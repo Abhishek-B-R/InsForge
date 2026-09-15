@@ -1592,16 +1592,58 @@ export class AuthService {
   }
 
   /**
-   * Delete multiple users by IDs
+   * Delete multiple users by IDs.
+   *
+   * Also clears auth.email_otps for those users' emails. OTP rows are keyed by
+   * email, not user id, so a plain DELETE FROM auth.users leaves them behind.
+   * Re-registering the same address then races a fresh verification email
+   * against any leftover active codes from the previous account.
    */
   async deleteUsers(userIds: string[]): Promise<number> {
-    const pool = this.getPool();
-    const placeholders = userIds.map((_, i) => `$${i + 1}`).join(',');
-    const result = await pool.query(
-      `DELETE FROM auth.users WHERE id IN (${placeholders})`,
-      userIds
-    );
+    if (userIds.length === 0) {
+      return 0;
+    }
 
-    return result.rowCount || 0;
+    const pool = this.getPool();
+    const client = await pool.connect();
+    const placeholders = userIds.map((_, i) => `$${i + 1}`).join(',');
+
+    try {
+      await client.query('BEGIN');
+
+      const emailsResult = await client.query<{ email: string | null }>(
+        `SELECT email FROM auth.users WHERE id IN (${placeholders})`,
+        userIds
+      );
+
+      const emails = [
+        ...new Set(
+          emailsResult.rows
+            .map((row) => row.email)
+            .filter((email): email is string => typeof email === 'string' && email.length > 0)
+        ),
+      ];
+
+      if (emails.length > 0) {
+        await client.query(`DELETE FROM auth.email_otps WHERE email = ANY($1::text[])`, [emails]);
+      }
+
+      const result = await client.query(
+        `DELETE FROM auth.users WHERE id IN (${placeholders})`,
+        userIds
+      );
+
+      await client.query('COMMIT');
+      return result.rowCount || 0;
+    } catch (error) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Keep the original failure if rollback itself fails.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
