@@ -93,8 +93,16 @@ export function TableForm({
   const [error, setError] = useState<string | null>(null);
   const [showForeignKeyDialog, setShowForeignKeyDialog] = useState(false);
   const [editingForeignKey, setEditingForeignKey] = useState<string>();
-  const [foreignKeys, setForeignKeys] = useState<TableFormForeignKeySchema[]>([]);
+  const [foreignKeys, setForeignKeysState] = useState<TableFormForeignKeySchema[]>([]);
   const [foreignKeysDirty, setForeignKeysDirty] = useState(false);
+  // The draft watcher fires between a state update here and the render that carries it, so
+  // reading the foreign keys out of a closure can see the list from before a restore. That is
+  // how a draft whose only content is a foreign key gets saved back as empty, which erases it.
+  const foreignKeysRef = useRef<TableFormForeignKeySchema[]>([]);
+  const setForeignKeys = useCallback((next: TableFormForeignKeySchema[]) => {
+    foreignKeysRef.current = next;
+    setForeignKeysState(next);
+  }, []);
   const queryClient = useQueryClient();
   const { showToast } = useToast();
 
@@ -160,7 +168,7 @@ export function TableForm({
       setForeignKeys([]);
       setForeignKeysDirty(false);
     }
-  }, [editTable, form, mode, open, schemaName]);
+  }, [editTable, form, mode, open, schemaName, setForeignKeys]);
 
   useEffect(() => {
     setFormIsDirty(form.formState.isDirty || foreignKeysDirty);
@@ -228,20 +236,29 @@ export function TableForm({
     );
     setForeignKeys(draft?.foreignKeys ?? []);
     setForeignKeysDirty(Boolean(draft?.foreignKeys.length));
-  }, [draftScope, foreignKeys, form, mode, open, saveDraft, schemaName]);
+  }, [draftScope, foreignKeys, form, mode, open, saveDraft, schemaName, setForeignKeys]);
 
   // Save the create form as it is filled in, so a refresh or a discarded tab does not lose it.
   // Foreign keys are not form fields, so their handlers save them directly.
-  // Keep this below useFieldArray, whose own effect reports the columns on mount. A watcher
-  // subscribed before that report would save it with the foreign keys from before the restore.
+  //
+  // Nothing is written until the draft for this scope and schema has been restored. Every
+  // notification before that carries the empty form, and an empty form saves as no input at
+  // all, which deletes the very draft the restore is about to read. A draft holding only a
+  // foreign key is the case with nothing else left to rebuild it from.
   useEffect(() => {
     if (!open || mode !== 'create' || draftScope === undefined) {
       return;
     }
 
-    const subscription = form.watch(() => saveDraft(draftScope, form.getValues(), foreignKeys));
+    const subscription = form.watch(() => {
+      const restoredFor = restoredForRef.current;
+      if (restoredFor?.scope !== draftScope || restoredFor.schemaName !== schemaName) {
+        return;
+      }
+      saveDraft(draftScope, form.getValues(), foreignKeysRef.current);
+    });
     return () => subscription.unsubscribe();
-  }, [draftScope, foreignKeys, form, mode, open, saveDraft]);
+  }, [draftScope, form, mode, open, saveDraft, schemaName]);
 
   const sortedFields = useMemo(() => {
     return [...fields].sort((a, b) => {

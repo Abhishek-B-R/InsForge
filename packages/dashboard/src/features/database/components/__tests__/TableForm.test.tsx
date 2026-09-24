@@ -187,6 +187,70 @@ describe('TableForm create drafts', () => {
     expect(loadCreateTableDraft('project-1', SCHEMA)?.foreignKeys).toEqual([authorForeignKey]);
   });
 
+  it('writes nothing under the draft key until the draft has been restored', () => {
+    // An empty create form saves as "no input at all", which deletes the draft. So every write
+    // before the restore is a chance to erase the thing being restored, and a draft holding
+    // only a foreign key has nothing else left to rebuild it from.
+    saveCreateTableDraft(
+      'project-1',
+      SCHEMA,
+      { tableName: '', columns: [idColumn, newColumn('')] },
+      [authorForeignKey]
+    );
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const removeItem = vi.spyOn(Storage.prototype, 'removeItem');
+
+    renderTableForm({ draftScope: 'project-1' });
+
+    expect(removeItem).not.toHaveBeenCalled();
+    for (const [, value] of setItem.mock.calls) {
+      expect(value).toContain('author_id');
+    }
+  });
+
+  it('writes nothing under the draft key while the scope is still unknown', async () => {
+    saveCreateTableDraft(
+      'project-1',
+      SCHEMA,
+      { tableName: '', columns: [idColumn, newColumn('')] },
+      [authorForeignKey]
+    );
+    const user = userEvent.setup();
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const removeItem = vi.spyOn(Storage.prototype, 'removeItem');
+    const form = renderTableForm({});
+
+    await user.click(screen.getByRole('button', { name: 'Add Column' }));
+
+    expect(setItem).not.toHaveBeenCalled();
+    expect(removeItem).not.toHaveBeenCalled();
+
+    form.rerenderWith({ draftScope: 'project-1' });
+
+    expect(loadCreateTableDraft('project-1', SCHEMA)?.foreignKeys).toEqual([authorForeignKey]);
+  });
+
+  it('keeps a restored foreign key when the form is edited afterwards', async () => {
+    saveCreateTableDraft(
+      'project-1',
+      SCHEMA,
+      { tableName: '', columns: [idColumn, newColumn('')] },
+      [authorForeignKey]
+    );
+    const user = userEvent.setup();
+    renderTableForm({ draftScope: 'project-1' });
+
+    // The watcher only sees form fields, so it has to read the foreign keys from somewhere.
+    // Reading them from a stale render would save this column change over the restored key.
+    await user.click(screen.getByRole('button', { name: 'Add Column' }));
+    await user.type(tableNameInput(), 'posts');
+
+    const draft = loadCreateTableDraft('project-1', SCHEMA);
+    expect(draft?.foreignKeys).toEqual([authorForeignKey]);
+    expect(draft?.tableName).toBe('posts');
+    expect(draft?.columns).toHaveLength(3);
+  });
+
   it('restores the draft when its scope arrives after an empty row was added', async () => {
     const columns = [idColumn, newColumn('title')];
     saveCreateTableDraft('project-1', SCHEMA, { tableName: 'posts', columns }, []);
