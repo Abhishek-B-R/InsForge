@@ -86,34 +86,55 @@ export const getFeatureFlag = (featureFlag: string): string | boolean | undefine
   return posthog.getFeatureFlag(featureFlag);
 };
 
-// posthog-js abandons a slow flags request after feature_flag_request_timeout_ms and still
-// calls back, so every real answer lands inside that window. Only a quota-limited response
-// skips the callback entirely, and that is what waiting a little past the timeout catches.
+// posthog-js gives up on a slow flags request after feature_flag_request_timeout_ms and calls
+// back with errorsLoading, so a failed request reports itself. A quota-limited response is the
+// one case that skips the callback entirely, and this margin is what catches it. Reaching the
+// margin is the end of waiting for an answer, not an answer.
 const FEATURE_FLAGS_WAIT_MARGIN_MS = 2000;
 
-// A flag that is not set and flags that have not loaded yet both read as undefined.
-// This tells them apart. Without a PostHog key there is nothing to wait for.
-export const useFeatureFlagsReady = (): boolean => {
-  const [ready, setReady] = useState(
-    () => !POSTHOG_KEY || posthog.featureFlags?.hasLoadedFlags === true
+/**
+ * `pending` while an answer may still arrive, `loaded` once the flags are known, and
+ * `unavailable` when PostHog reported the request failed or nothing came back at all.
+ *
+ * `unavailable` is not a variant. Every flag reads as undefined in that state, which is also
+ * what a control user reads, so a decision that cannot be taken back (a redirect, a one-shot
+ * dialog) must not treat the two as the same thing.
+ */
+export type FeatureFlagsStatus = 'pending' | 'loaded' | 'unavailable';
+
+export const useFeatureFlagsStatus = (): FeatureFlagsStatus => {
+  // Without a PostHog key there is nothing to wait for and no flag will ever be set.
+  const [status, setStatus] = useState<FeatureFlagsStatus>(() =>
+    !POSTHOG_KEY || posthog.featureFlags?.hasLoadedFlags === true ? 'loaded' : 'pending'
   );
 
   useEffect(() => {
-    if (!POSTHOG_KEY || ready) {
+    if (status === 'loaded') {
       return;
     }
-    const waitMs = posthog.config.feature_flag_request_timeout_ms + FEATURE_FLAGS_WAIT_MARGIN_MS;
-    const timeout = setTimeout(() => setReady(true), waitMs);
     // Fires straight away if flags loaded after the initial render.
-    const unsubscribe = posthog.onFeatureFlags(() => setReady(true));
+    const unsubscribe = posthog.onFeatureFlags((_flags, _variants, context) =>
+      setStatus(context?.errorsLoading ? 'unavailable' : 'loaded')
+    );
+    if (status === 'unavailable') {
+      // The wait is already over. Keep listening, because a late answer still upgrades this.
+      return unsubscribe;
+    }
+    const waitMs = posthog.config.feature_flag_request_timeout_ms + FEATURE_FLAGS_WAIT_MARGIN_MS;
+    const timeout = setTimeout(() => setStatus('unavailable'), waitMs);
     return () => {
       clearTimeout(timeout);
       unsubscribe();
     };
-  }, [ready]);
+  }, [status]);
 
-  return ready;
+  return status;
 };
+
+// True once there is no point waiting longer, whether or not the variant is known. For a
+// decision that has to be made either way. Where an unknown variant must not be read as the
+// default one, use useFeatureFlagsStatus and handle `unavailable` on its own.
+export const useFeatureFlagsReady = (): boolean => useFeatureFlagsStatus() !== 'pending';
 
 // Use in render instead of getFeatureFlag, which only reads the value once.
 export const useFeatureFlag = (featureFlag: string): string | boolean | undefined => {

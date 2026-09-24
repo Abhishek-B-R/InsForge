@@ -1,10 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
+type FlagCallback = (
+  flags: string[],
+  variants: Record<string, string | boolean>,
+  context?: { errorsLoading?: boolean }
+) => void;
+
 const mocks = vi.hoisted(() => {
-  let flagCallback: (() => void) | null = null;
+  let flagCallback: FlagCallback | null = null;
   let currentFlags: Record<string, string | boolean> = {};
   let hasLoadedFlags = false;
+
+  const fire = (errorsLoading?: boolean) =>
+    flagCallback?.(Object.keys(currentFlags), currentFlags, { errorsLoading });
 
   return {
     reset() {
@@ -17,7 +26,12 @@ const mocks = vi.hoisted(() => {
       hasLoadedFlags = true;
     },
     fireFlags() {
-      flagCallback?.();
+      fire();
+    },
+    // posthog-js calls back with errorsLoading when it abandons the request: a timeout, a
+    // connection error or a non-200. A quota-limited response is the one that never calls back.
+    fireFlagsError() {
+      fire(true);
     },
     hasSubscriber() {
       return flagCallback !== null;
@@ -26,11 +40,11 @@ const mocks = vi.hoisted(() => {
       init: vi.fn(),
       config: { feature_flag_request_timeout_ms: 3000 },
       getFeatureFlag: vi.fn((key: string) => currentFlags[key]),
-      onFeatureFlags: vi.fn((cb: () => void) => {
+      onFeatureFlags: vi.fn((cb: FlagCallback) => {
         flagCallback = cb;
         // Like posthog-js, call back straight away when flags are already loaded.
         if (hasLoadedFlags) {
-          cb();
+          cb(Object.keys(currentFlags), currentFlags, {});
         }
         return () => {
           if (flagCallback === cb) {
@@ -147,9 +161,73 @@ describe('feature flag hooks', () => {
         vi.advanceTimersByTime(1);
       });
       expect(result.current).toBe(true);
-      expect(mocks.hasSubscriber()).toBe(false);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // The elapsed wait is the end of waiting, not an answer. Reporting it as `loaded` made every
+  // flag read as undefined, which is what a control user reads, so one-shot decisions took the
+  // control branch for a D_TEST user whose response was still in flight.
+  it('useFeatureFlagsStatus reports an elapsed wait as unavailable, not loaded', async () => {
+    const { useFeatureFlagsStatus } = await import('#lib/analytics/posthog');
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useFeatureFlagsStatus());
+
+      expect(result.current).toBe('pending');
+
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(result.current).toBe('unavailable');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('useFeatureFlagsStatus upgrades to loaded when a late answer arrives', async () => {
+    const { useFeatureFlagsStatus } = await import('#lib/analytics/posthog');
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useFeatureFlagsStatus());
+
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(result.current).toBe('unavailable');
+
+      // Still subscribed, so the answer that was in flight is not thrown away.
+      expect(mocks.hasSubscriber()).toBe(true);
+      act(() => {
+        mocks.setFlags({ 'dashboard-v4-experiment': 'd_test' });
+        mocks.fireFlags();
+      });
+      expect(result.current).toBe('loaded');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('useFeatureFlagsStatus reports a failed request as unavailable', async () => {
+    const { useFeatureFlagsStatus } = await import('#lib/analytics/posthog');
+    const { result } = renderHook(() => useFeatureFlagsStatus());
+
+    expect(result.current).toBe('pending');
+
+    act(() => {
+      mocks.fireFlagsError();
+    });
+
+    expect(result.current).toBe('unavailable');
+  });
+
+  it('useFeatureFlagsStatus is loaded straight away with no PostHog key', async () => {
+    vi.stubEnv('VITE_PUBLIC_POSTHOG_KEY', '');
+    vi.resetModules();
+    const { useFeatureFlagsStatus } = await import('#lib/analytics/posthog');
+    const { result } = renderHook(() => useFeatureFlagsStatus());
+
+    expect(result.current).toBe('loaded');
   });
 });

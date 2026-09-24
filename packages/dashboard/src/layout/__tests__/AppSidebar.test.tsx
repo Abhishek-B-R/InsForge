@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
     allowed: boolean;
     reason: 'plan' | 'partner' | null;
   },
+  dashboardVariant: undefined as string | undefined,
 }));
 
 vi.mock('#lib/hooks/useAiEntitlement', () => ({
@@ -25,8 +26,9 @@ vi.mock('#lib/utils/utils', async (importOriginal) => ({
 
 vi.mock('#lib/analytics/posthog', () => ({
   getFeatureFlag: () => undefined,
-  useFeatureFlag: () => undefined,
+  useFeatureFlag: () => mocks.dashboardVariant,
   useFeatureFlagsReady: () => true,
+  useFeatureFlagsStatus: () => 'loaded',
 }));
 
 // Heavy children that pull in API/context of their own and are irrelevant here.
@@ -38,6 +40,7 @@ vi.mock('#components', () => ({
 }));
 
 import AppSidebar from '#layout/AppSidebar';
+import { FEATURE_FLAG_VARIANTS } from '#lib/analytics/constants';
 
 function renderSidebar() {
   return render(
@@ -50,6 +53,7 @@ function renderSidebar() {
 describe('AppSidebar AI tab', () => {
   beforeEach(() => {
     mocks.entitlement = { isLoading: false, allowed: true, reason: null };
+    mocks.dashboardVariant = undefined;
   });
 
   it('shows the AI tab for an entitled project', () => {
@@ -67,5 +71,43 @@ describe('AppSidebar AI tab', () => {
     mocks.entitlement = { isLoading: false, allowed: false, reason: 'partner' };
     renderSidebar();
     expect(screen.queryByText('Model Gateway')).not.toBeInTheDocument();
+  });
+});
+
+describe('AppSidebar D_TEST items', () => {
+  beforeEach(() => {
+    mocks.entitlement = { isLoading: false, allowed: true, reason: null };
+    mocks.dashboardVariant = undefined;
+  });
+
+  it('adds Install and Doc for a D_TEST user on cloud', () => {
+    mocks.dashboardVariant = FEATURE_FLAG_VARIANTS.D_TEST;
+    renderSidebar();
+
+    expect(screen.getByText('Install')).toBeInTheDocument();
+    expect(screen.getByText('Doc')).toBeInTheDocument();
+  });
+
+  it('leaves them out for the control variant', () => {
+    renderSidebar();
+
+    expect(screen.queryByText('Install')).not.toBeInTheDocument();
+    expect(screen.queryByText('Doc')).not.toBeInTheDocument();
+  });
+
+  // The sidebar reads the flag through the hook now, so a variant landing after the first
+  // render has to add the items. Reading it once left a D_TEST user without them.
+  it('adds them when the variant arrives after the first render', () => {
+    const view = renderSidebar();
+    expect(screen.queryByText('Install')).not.toBeInTheDocument();
+
+    mocks.dashboardVariant = FEATURE_FLAG_VARIANTS.D_TEST;
+    view.rerender(
+      <MemoryRouter>
+        <AppSidebar isCollapsed={false} onToggleCollapse={() => {}} />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByText('Install')).toBeInTheDocument();
   });
 });

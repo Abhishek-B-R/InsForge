@@ -47,10 +47,14 @@ vi.mock('#lib/config/DashboardHostContext', async (importOriginal) => {
   return { ...actual, useIsCloudHostingMode: () => host.mode === 'cloud-hosting' };
 });
 
-const flags = { ready: true, variant: undefined as string | undefined };
+const flags = {
+  status: 'loaded' as 'pending' | 'loaded' | 'unavailable',
+  variant: undefined as string | undefined,
+};
 vi.mock('#lib/analytics/posthog', async (importOriginal) => ({
   ...(await importOriginal<typeof import('#lib/analytics/posthog')>()),
-  useFeatureFlagsReady: () => flags.ready,
+  useFeatureFlagsStatus: () => flags.status,
+  useFeatureFlagsReady: () => flags.status !== 'pending',
   useFeatureFlag: () => flags.variant,
 }));
 
@@ -111,9 +115,17 @@ describe('AppRoutes host-mode gating', () => {
 
 describe('AppRoutes /dashboard/install', () => {
   beforeEach(() => {
-    flags.ready = false;
+    flags.status = 'pending';
     flags.variant = undefined;
   });
+
+  function rerenderAtInstall(view: ReturnType<typeof renderAt>) {
+    view.rerender(
+      <MemoryRouter initialEntries={['/dashboard/install']}>
+        <AppRoutes />
+      </MemoryRouter>
+    );
+  }
 
   // Redirecting while flags are still loading would send D_TEST users away from
   // the install page on every hard refresh.
@@ -123,20 +135,39 @@ describe('AppRoutes /dashboard/install', () => {
     expect(screen.queryByText('DTEST_INSTALL')).toBeNull();
     expect(screen.queryByText('LEGACY_HOME')).toBeNull();
 
-    flags.ready = true;
+    flags.status = 'loaded';
     flags.variant = FEATURE_FLAG_VARIANTS.D_TEST;
-    view.rerender(
-      <MemoryRouter initialEntries={['/dashboard/install']}>
-        <AppRoutes />
-      </MemoryRouter>
-    );
+    rerenderAtInstall(view);
 
     expect(screen.getByText('DTEST_INSTALL')).toBeInTheDocument();
   });
 
   it('redirects to the dashboard home once flags load without the D_TEST variant', () => {
-    flags.ready = true;
+    flags.status = 'loaded';
     renderAt('/dashboard/install');
+
+    expect(screen.getByText('LEGACY_HOME')).toBeInTheDocument();
+    expect(screen.queryByText('DTEST_INSTALL')).toBeNull();
+  });
+
+  // The whole point of separating `unavailable` from `loaded`. Giving up on the flags request
+  // leaves every variant undefined, which reads exactly like a control user. Redirecting on
+  // that guess is a navigation, and the D_TEST answer arriving a second later cannot undo it.
+  it('keeps the install page when the flags request gave no answer', () => {
+    flags.status = 'unavailable';
+    renderAt('/dashboard/install');
+
+    expect(screen.getByText('DTEST_INSTALL')).toBeInTheDocument();
+    expect(screen.queryByText('LEGACY_HOME')).toBeNull();
+  });
+
+  it('redirects once a late answer confirms the user is not in D_TEST', () => {
+    flags.status = 'unavailable';
+    const view = renderAt('/dashboard/install');
+    expect(screen.getByText('DTEST_INSTALL')).toBeInTheDocument();
+
+    flags.status = 'loaded';
+    rerenderAtInstall(view);
 
     expect(screen.getByText('LEGACY_HOME')).toBeInTheDocument();
     expect(screen.queryByText('DTEST_INSTALL')).toBeNull();
