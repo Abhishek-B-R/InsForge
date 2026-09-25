@@ -245,6 +245,25 @@ describe('feature flag hooks', () => {
     expect(result.current).toBe('loaded');
   });
 
+  // An answer that lands while the hook moves from pending to unavailable reaches the new
+  // subscription only through its immediate callback, so that callback must not be dropped.
+  it('useFeatureFlagsStatus takes an answer replayed on re-subscribe as loaded', async () => {
+    const { useFeatureFlagsStatus } = await import('#lib/analytics/posthog');
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useFeatureFlagsStatus());
+
+      act(() => {
+        mocks.setFlags({ 'dashboard-v4-experiment': 'control' });
+        vi.advanceTimersByTime(5000);
+      });
+
+      expect(result.current).toBe('loaded');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('useFeatureFlagsStatus is loaded straight away with no PostHog key', async () => {
     vi.stubEnv('VITE_PUBLIC_POSTHOG_KEY', '');
     vi.resetModules();
