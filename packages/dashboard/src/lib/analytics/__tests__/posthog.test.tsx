@@ -30,7 +30,9 @@ const mocks = vi.hoisted(() => {
     },
     // posthog-js calls back with errorsLoading when it abandons the request: a timeout, a
     // connection error or a non-200. A quota-limited response is the one that never calls back.
+    // It marks flags as loaded first, so a later subscriber is called back straight away.
     fireFlagsError() {
+      hasLoadedFlags = true;
       fire(true);
     },
     hasSubscriber() {
@@ -220,6 +222,27 @@ describe('feature flag hooks', () => {
     });
 
     expect(result.current).toBe('unavailable');
+  });
+
+  // PostHog counts a failed request as loaded, so re-subscribing after it calls back straight
+  // away with no errorsLoading. That callback is not an answer and must not read as `loaded`.
+  it('useFeatureFlagsStatus stays unavailable after a failed request until a real answer', async () => {
+    const { useFeatureFlagsStatus } = await import('#lib/analytics/posthog');
+    const { result } = renderHook(() => useFeatureFlagsStatus());
+
+    act(() => {
+      mocks.fireFlagsError();
+    });
+
+    expect(result.current).toBe('unavailable');
+    expect(mocks.hasSubscriber()).toBe(true);
+
+    act(() => {
+      mocks.setFlags({ 'dashboard-v4-experiment': 'd_test' });
+      mocks.fireFlags();
+    });
+
+    expect(result.current).toBe('loaded');
   });
 
   it('useFeatureFlagsStatus is loaded straight away with no PostHog key', async () => {
