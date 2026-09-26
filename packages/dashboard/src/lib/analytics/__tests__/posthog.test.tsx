@@ -286,6 +286,42 @@ describe('feature flag hooks', () => {
     expect(result.current).toBe('loaded');
   });
 
+  // A control user can get a successful answer with no variants. If it lands while the hook
+  // moves to unavailable, the replay is the only place it shows up, so it must count.
+  it('useFeatureFlagsStatus takes an empty successful answer on re-subscribe as loaded', async () => {
+    const { useFeatureFlagsStatus } = await import('#lib/analytics/posthog');
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useFeatureFlagsStatus());
+
+      act(() => {
+        mocks.setFlags({});
+        vi.advanceTimersByTime(5000);
+      });
+
+      expect(result.current).toBe('loaded');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('useFeatureFlagsStatus recovers to loaded when a load succeeds after a failed one', async () => {
+    const { useFeatureFlagsStatus } = await import('#lib/analytics/posthog');
+
+    mocks.fireFlagsError();
+    const first = renderHook(() => useFeatureFlagsStatus());
+    expect(first.result.current).toBe('unavailable');
+    first.unmount();
+
+    act(() => {
+      mocks.setFlags({ 'dashboard-v4-experiment': 'control' });
+      mocks.fireFlags();
+    });
+
+    const second = renderHook(() => useFeatureFlagsStatus());
+    expect(second.result.current).toBe('loaded');
+  });
+
   it('useFeatureFlagsStatus is loaded straight away with no PostHog key', async () => {
     vi.stubEnv('VITE_PUBLIC_POSTHOG_KEY', '');
     vi.resetModules();

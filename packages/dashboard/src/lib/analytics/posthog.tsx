@@ -129,11 +129,11 @@ export const useFeatureFlagsStatus = (): FeatureFlagsStatus => {
     }
     // Fires straight away if flags loaded after the initial render. After a failed request
     // PostHog also counts flags as loaded, so when re-subscribing from `unavailable` that
-    // immediate callback replays the failure with no flags and no errorsLoading. Skip only that
-    // empty replay: if flags did arrive meanwhile, the replay carries them and is an answer.
+    // immediate callback replays the failure with no errorsLoading. Skip it only when the last
+    // request did fail: a successful answer, even one with no variants, is still an answer.
     let subscribing = true;
-    const unsubscribe = posthog.onFeatureFlags((_flags, variants, context) => {
-      if (subscribing && status === 'unavailable' && Object.keys(variants ?? {}).length === 0) {
+    const unsubscribe = posthog.onFeatureFlags((_flags, _variants, context) => {
+      if (subscribing && status === 'unavailable' && lastFlagsRequestFailed) {
         return;
       }
       setStatus(context?.errorsLoading ? 'unavailable' : 'loaded');
