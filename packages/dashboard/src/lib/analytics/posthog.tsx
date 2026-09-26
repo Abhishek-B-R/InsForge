@@ -4,6 +4,11 @@ import { PostHogProvider } from 'posthog-js/react';
 
 const POSTHOG_KEY = import.meta.env.VITE_PUBLIC_POSTHOG_KEY || '';
 
+// posthog-js marks flags as loaded before it reports a failed request, so hasLoadedFlags cannot
+// tell a failure from an answer. This remembers how the last request ended, for a status hook
+// that mounts after it.
+let lastFlagsRequestFailed = false;
+
 if (POSTHOG_KEY) {
   try {
     posthog.init(POSTHOG_KEY, {
@@ -13,6 +18,10 @@ if (POSTHOG_KEY) {
       session_recording: {
         recordCrossOriginIframes: true,
       },
+    });
+    // Registered before the first flags request, so it hears how every request ends.
+    posthog.onFeatureFlags((_flags, _variants, context) => {
+      lastFlagsRequestFailed = context?.errorsLoading === true;
     });
   } catch (error) {
     console.error('[PostHog] ❌ Error initializing PostHog', error);
@@ -104,9 +113,15 @@ export type FeatureFlagsStatus = 'pending' | 'loaded' | 'unavailable';
 
 export const useFeatureFlagsStatus = (): FeatureFlagsStatus => {
   // Without a PostHog key there is nothing to wait for and no flag will ever be set.
-  const [status, setStatus] = useState<FeatureFlagsStatus>(() =>
-    !POSTHOG_KEY || posthog.featureFlags?.hasLoadedFlags === true ? 'loaded' : 'pending'
-  );
+  const [status, setStatus] = useState<FeatureFlagsStatus>(() => {
+    if (!POSTHOG_KEY) {
+      return 'loaded';
+    }
+    if (posthog.featureFlags?.hasLoadedFlags !== true) {
+      return 'pending';
+    }
+    return lastFlagsRequestFailed ? 'unavailable' : 'loaded';
+  });
 
   useEffect(() => {
     if (status === 'loaded') {

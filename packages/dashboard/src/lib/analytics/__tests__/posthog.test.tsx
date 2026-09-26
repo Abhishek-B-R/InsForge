@@ -8,16 +8,18 @@ type FlagCallback = (
 ) => void;
 
 const mocks = vi.hoisted(() => {
-  let flagCallback: FlagCallback | null = null;
+  const flagCallbacks = new Set<FlagCallback>();
   let currentFlags: Record<string, string | boolean> = {};
   let hasLoadedFlags = false;
 
   const fire = (errorsLoading?: boolean) =>
-    flagCallback?.(Object.keys(currentFlags), currentFlags, { errorsLoading });
+    [...flagCallbacks].forEach((cb) =>
+      cb(Object.keys(currentFlags), currentFlags, { errorsLoading })
+    );
 
   return {
     reset() {
-      flagCallback = null;
+      flagCallbacks.clear();
       currentFlags = {};
       hasLoadedFlags = false;
     },
@@ -35,23 +37,22 @@ const mocks = vi.hoisted(() => {
       hasLoadedFlags = true;
       fire(true);
     },
-    hasSubscriber() {
-      return flagCallback !== null;
+    // The module registers one listener of its own at init, so hooks are counted on top of it.
+    subscriberCount() {
+      return flagCallbacks.size;
     },
     posthog: {
       init: vi.fn(),
       config: { feature_flag_request_timeout_ms: 3000 },
       getFeatureFlag: vi.fn((key: string) => currentFlags[key]),
       onFeatureFlags: vi.fn((cb: FlagCallback) => {
-        flagCallback = cb;
+        flagCallbacks.add(cb);
         // Like posthog-js, call back straight away when flags are already loaded.
         if (hasLoadedFlags) {
           cb(Object.keys(currentFlags), currentFlags, {});
         }
         return () => {
-          if (flagCallback === cb) {
-            flagCallback = null;
-          }
+          flagCallbacks.delete(cb);
         };
       }),
       featureFlags: {
@@ -116,11 +117,12 @@ describe('feature flag hooks', () => {
 
   it('useFeatureFlag unsubscribes on unmount', async () => {
     const { useFeatureFlag } = await import('#lib/analytics/posthog');
+    const moduleListeners = mocks.subscriberCount();
     const { unmount } = renderHook(() => useFeatureFlag('dashboard-v4-experiment'));
 
-    expect(mocks.hasSubscriber()).toBe(true);
+    expect(mocks.subscriberCount()).toBe(moduleListeners + 1);
     unmount();
-    expect(mocks.hasSubscriber()).toBe(false);
+    expect(mocks.subscriberCount()).toBe(moduleListeners);
   });
 
   it('useFeatureFlagsReady flips true after the first flag load', async () => {
@@ -190,6 +192,7 @@ describe('feature flag hooks', () => {
 
   it('useFeatureFlagsStatus upgrades to loaded when a late answer arrives', async () => {
     const { useFeatureFlagsStatus } = await import('#lib/analytics/posthog');
+    const moduleListeners = mocks.subscriberCount();
     vi.useFakeTimers();
     try {
       const { result } = renderHook(() => useFeatureFlagsStatus());
@@ -200,7 +203,7 @@ describe('feature flag hooks', () => {
       expect(result.current).toBe('unavailable');
 
       // Still subscribed, so the answer that was in flight is not thrown away.
-      expect(mocks.hasSubscriber()).toBe(true);
+      expect(mocks.subscriberCount()).toBe(moduleListeners + 1);
       act(() => {
         mocks.setFlags({ 'dashboard-v4-experiment': 'd_test' });
         mocks.fireFlags();
@@ -228,6 +231,7 @@ describe('feature flag hooks', () => {
   // away with no errorsLoading. That callback is not an answer and must not read as `loaded`.
   it('useFeatureFlagsStatus stays unavailable after a failed request until a real answer', async () => {
     const { useFeatureFlagsStatus } = await import('#lib/analytics/posthog');
+    const moduleListeners = mocks.subscriberCount();
     const { result } = renderHook(() => useFeatureFlagsStatus());
 
     act(() => {
@@ -235,7 +239,7 @@ describe('feature flag hooks', () => {
     });
 
     expect(result.current).toBe('unavailable');
-    expect(mocks.hasSubscriber()).toBe(true);
+    expect(mocks.subscriberCount()).toBe(moduleListeners + 1);
 
     act(() => {
       mocks.setFlags({ 'dashboard-v4-experiment': 'd_test' });
@@ -262,6 +266,24 @@ describe('feature flag hooks', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // PostHog counts a failed request as loaded, so a status hook that mounts after the failure
+  // (a route that renders once auth settles) must still see it as unavailable, not loaded.
+  it('useFeatureFlagsStatus mounted after a failed request starts unavailable', async () => {
+    const { useFeatureFlagsStatus } = await import('#lib/analytics/posthog');
+
+    mocks.fireFlagsError();
+    const { result } = renderHook(() => useFeatureFlagsStatus());
+
+    expect(result.current).toBe('unavailable');
+
+    act(() => {
+      mocks.setFlags({ 'dashboard-v4-experiment': 'd_test' });
+      mocks.fireFlags();
+    });
+
+    expect(result.current).toBe('loaded');
   });
 
   it('useFeatureFlagsStatus is loaded straight away with no PostHog key', async () => {
